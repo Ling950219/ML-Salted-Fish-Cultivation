@@ -48,7 +48,7 @@ class logistic_regression(object):
         w_size = w.shape[0]
         # l1正则梯度暂时没推导出，次梯度存在求解慢的问题
         if self.penalty == 'l2':
-            dw =  C * np.sum(w) / w_size
+            dw =  C * w / w_size
         else:
             dw = w
 
