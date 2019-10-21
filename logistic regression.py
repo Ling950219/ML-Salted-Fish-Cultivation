@@ -11,7 +11,8 @@ warnings.filterwarnings('ignore')
 class logistic_regression(object):
 
     def __init__(self, penalty='l2', C=1.0, tol=1e-4, fit_intercept=True, intercept_scaling=1, optimal_method='SGD',
-                 learning_rate=0.01, batch_num=None, random_state=None, max_iter=300, verbose=False, warm_start=False, n_jobs=None):
+                 learning_rate=0.01, batch_num=None, random_state=None, max_iter=100, min_iter=20, verbose=False,
+                 warm_start=False, n_jobs=None):
         self.C = C
         self.tol = tol
         self.penalty = penalty
@@ -23,14 +24,15 @@ class logistic_regression(object):
         self.batch_num = batch_num
         self.random_state = random_state
         self.max_iter = max_iter
+        self.min_iter = min_iter
         self.verbose = verbose
         self.warm_start = warm_start
         self.n_jobs = n_jobs
 
     def data_check(self, X, y):
         n_classes = len(np.unique(y))
-        if n_classes < 2:
-            raise ValueError("This solver needs samples of at least 2 classes")
+        if n_classes != 2:
+            raise ValueError("This solver needs samples of 2 classes")
 
     def sigmoid(self, x):
         res =  1 / (1 + np.exp(-x))
@@ -107,10 +109,10 @@ class logistic_regression(object):
             # 终止条件一般有三种: 1.达到最大迭代次数; 2.前后两次梯度变化值小于某个阈值; 3.损失函数变化小于某个阈值
             # 由于LR损失函数存在log计算，很容易导致inf或者nan值，第三种终止判断条件可省略
             for i in range(iter_nums):
-                learning_rate = learning_rate / (1 + i * 30)
+                learning_rate = learning_rate / (1 + i * 0.3)
                 w = self.stochastic_gradient_descent(w, X, y, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
-                if gradient_change <= self.tol:
+                if gradient_change <= self.tol and self.min_iter:
                     print("gradient update break, the nums of iteration is %s, "
                           "and gradient change is %s" %(i, gradient_change))
                     break
@@ -118,20 +120,24 @@ class logistic_regression(object):
 
         elif optimal_method == 'BGD':
             for i in range(iter_nums):
-                learning_rate = learning_rate / (1 + i * 30)
+                learning_rate = learning_rate / (1 + i * 0.3)
                 w = self.batch_gradient_descent(w, X, y, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
-                if gradient_change <= self.tol:
+                if gradient_change <= self.tol and i > self.min_iter:
+                    print("gradient update break, the nums of iteration is %s, "
+                          "and gradient change is %s" % (i, gradient_change))
                     break
                 last_w = w
 
         elif optimal_method == 'MBGD':
             batch_num = kwargs.get('batch_num')
             for i in range(iter_nums):
-                learning_rate = learning_rate / (1 + i * 30)
+                learning_rate = learning_rate / (1 + i * 0.3)
                 w = self.mini_batch_gradient_descent(w, X, y, batch_num, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
-                if gradient_change <= self.tol:
+                if gradient_change <= self.tol and i > self.min_iter:
+                    print("gradient update break, the nums of iteration is %s, "
+                          "and gradient change is %s" % (i, gradient_change))
                     break
                 last_w = w
 
@@ -179,6 +185,19 @@ class logistic_regression(object):
         return pred_prod, pred_label
 
 if __name__ == '__main__':
+    '''
+    1.问题
+       模型效果很大程度上取决于learning rate，即alpha。起初未设置动态调整alpha，只有SGD的模型效果比较好;引入动态
+    调整alhpa策略后，MBDG效果改善，BGD效果仍然很差。
+    
+    2.debug分析
+       经过debug分析后，造成上述情况的原因为alpha:若不采用动态调整alpha策略，由于BGD每次更新参数采用全部数据，步幅
+    较大会导致后期参数不收敛，而MBGD由于采用batch策略，稍微缓解了后期这种全部数据更新参数的弊端，SGD同理。
+       引入动态更新策略后，初期效果仍然不好的原因为:随着迭代次数增加，alpha衰减过快，导致模型未能很好地进行迭代学习。
+    
+    3.解决策略
+       最终解决策略为:合理设置alpha衰减策略，既要解决收敛问题，又不能过快衰减。
+    '''
     # 1.load data
     breast_cancer = load_breast_cancer()
     X = breast_cancer['data']
@@ -188,7 +207,7 @@ if __name__ == '__main__':
     train_X, test_X, train_y, test_y = train_test_split(X, y, shuffle=True, test_size=0.10)
 
     # 3.model training and print coef
-    LR = logistic_regression(optimal_method='SGD', batch_num=2, max_iter=300)
+    LR = logistic_regression(optimal_method='BGD', batch_num=2, max_iter=100)
     LR.fit(train_X, train_y)
 
     # 4.test data and train data fit
