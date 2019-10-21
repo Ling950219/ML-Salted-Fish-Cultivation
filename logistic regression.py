@@ -1,20 +1,36 @@
 import numpy as np
 import pandas as pd
 import numbers
-from sklearn.datasets import load_diabetes
+import matplotlib.pyplot as plt
+plt.style.use('ggplot')
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+import warnings
+warnings.filterwarnings('ignore')
 
 class logistic_regression(object):
 
-    def __init__(self, C=1.0, tol=1e-4, random_state=None, max_iter=100, verbose=False,
-                 warm_start=False, n_jobs=None):
+    def __init__(self, penalty='l2', C=1.0, tol=1e-4, fit_intercept=True, intercept_scaling=1, optimal_method='SGD',
+                 learning_rate=0.01, batch_num=None, random_state=None, max_iter=300, verbose=False, warm_start=False, n_jobs=None):
         self.C = C
         self.tol = tol
+        self.penalty = penalty
+        self.coef = None
+        self.fit_intercept = fit_intercept
+        self.intercept_scaling = intercept_scaling
+        self.optimal_method = optimal_method
+        self.learning_rate = learning_rate
+        self.batch_num = batch_num
         self.random_state = random_state
         self.max_iter = max_iter
         self.verbose = verbose
         self.warm_start = warm_start
         self.n_jobs = n_jobs
 
+    def data_check(self, X, y):
+        n_classes = len(np.unique(y))
+        if n_classes < 2:
+            raise ValueError("This solver needs samples of at least 2 classes")
 
     def sigmoid(self, x):
         res =  1 / (1 + np.exp(-x))
@@ -22,195 +38,182 @@ class logistic_regression(object):
         return res
 
     def initial_paras(self, dim):
-        w = np.zeros((dim, 1))
-        b = 0
+        w = np.zeros((dim,))
 
-        return w, b
+        return w
 
-    def batch_gradient_descent(self, w, b, X, y, learning_rate):
+    def penalty_gradient(self, w, C):
+        w_size = w.shape[0]
+        # l1正则梯度暂时没推导出，次梯度存在求解慢的问题
+        if self.penalty == 'l2':
+            dw =  C * np.sum(w) / w_size
+        else:
+            dw = w
+
+        return dw
+
+    def batch_gradient_descent(self, w, X, y, learning_rate):
         sample_size = X.shape[0]
-        A = self.sigmoid(np.dot(X, w) + b)
+        A = self.sigmoid(np.dot(X, w))
         Z = A - y
-        cost = np.dot(y.T, np.log(A)) + np.dot((1-y).T, np.log(1-A))
 
-        dw = np.dot(X.T, Z) / sample_size
-        db = np.sum(Z) / sample_size
+        dw = np.sum(np.array([X[i] * Z[i] for i in range(sample_size)]), axis=0) / sample_size
+        penalty_dw = self.penalty_gradient(w, self.C)
+        w = w - learning_rate * (dw + penalty_dw)
 
-        return cost, dw, db
+        return w
 
-    def stochastic_gradient_descent(self, w, b, X, y, learning_rate=0.1):
+    def stochastic_gradient_descent(self, w, X, y, learning_rate):
         # 1.shuffle train data
         sample_size = X.shape[0]
         shuffle_indices = np.random.permutation(list(range(sample_size)))
 
         # 2.update w and b
-        cost_list = []
         for idx in shuffle_indices:
-            A = self.sigmoid(np.dot(X[idx, :], w) + b)
+            A = self.sigmoid(np.dot(X[idx, :], w))
             Z = A - y[idx]
-            cost = np.dot(y[idx], np.log(A)) + np.dot((1 - y[idx]), np.log(1 - A))
 
-            dw = np.dot(X, Z) / sample_size
-            db = np.sum(Z) / sample_size
+            dw = X[idx] * Z
+            penalty_dw = self.penalty_gradient(w, self.C)
+            w = w - learning_rate * (dw + penalty_dw)
 
-            cost_list.append(cost)
-            w = w - learning_rate * dw
-            b = b - learning_rate * db
+        return w
 
-        return w, b, cost_list
-
-    def mini_batch_gradient_descent(self, w, b, X, y, batch_num, learning_rate):
+    def mini_batch_gradient_descent(self, w, X, y, batch_num, learning_rate):
         # 1.shuffle train data
         sample_size = X.shape[0]
         shuffle_indices = np.random.permutation(list(range(sample_size)))
-        batch_size = np.ceil((sample_size / batch_num))
+        batch_size = int(np.floor((sample_size / batch_num)))
 
         # 2.update parameters by batches
-        cost_list = []
         for i in range(batch_num):
-            batch_X = X[shuffle_indices[(i-1) * batch_size: i * batch_size], :]
-            batch_y = y[shuffle_indices[(i-1) * batch_size: i * batch_size], :]
+            idx_list = [shuffle_indices[i + j * batch_num] for j in range(batch_size)]
+            batch_X = X[idx_list]
+            batch_y = y[idx_list]
 
-            A = self.sigmoid(np.dot(batch_X, w) + b)
+            A = self.sigmoid(np.dot(batch_X, w))
             Z = A - batch_y
-            cost = np.dot(batch_y.T, np.log(A)) + np.dot((1 - batch_y).T, np.log(1 - A))
 
-            dw = np.dot(batch_X, Z) / batch_X.shape[0]
-            db = np.sum(Z) / batch_X.shape[0]
+            dw = np.sum(np.array([batch_X[i] * Z[i] for i in range(batch_size)]), axis=0) / batch_size
+            penalty_dw = self.penalty_gradient(w, self.C)
+            w = w - learning_rate * (dw + penalty_dw)
 
-            cost_list.append(cost)
-            w = w - learning_rate * dw
-            b = b - learning_rate * db
+        return w
 
-        return w, b, cost_list
+    def solver(self, X, y, w, iter_nums, learning_rate, optimal_method, verbose=False, *args, **kwargs):
+        # update parameters
+        last_w = 0
+        if optimal_method == 'SGD':
+            # 终止条件一般有三种: 1.达到最大迭代次数; 2.前后两次梯度变化值小于某个阈值; 3.损失函数变化小于某个阈值
+            # 由于LR损失函数存在log计算，很容易导致inf或者nan值，第三种终止判断条件可省略
+            for i in range(iter_nums):
+                learning_rate = learning_rate / (1 + i * 30)
+                w = self.stochastic_gradient_descent(w, X, y, learning_rate)
+                gradient_change = np.sum(np.abs(w - last_w))
+                if gradient_change <= self.tol:
+                    print("gradient update break, the nums of iteration is %s, "
+                          "and gradient change is %s" %(i, gradient_change))
+                    break
+                last_w = w
 
-    def optimize(self, iter_nums, learning_rate, verbose=False):
-        # 1.load data
-        diabetes = load_diabetes()
-        X = diabetes['data']
-        y = np.random.randint(0, 2, size=X.shape[0])
-        y = y.reshape((y.shape[0], 1))
+        elif optimal_method == 'BGD':
+            for i in range(iter_nums):
+                learning_rate = learning_rate / (1 + i * 30)
+                w = self.batch_gradient_descent(w, X, y, learning_rate)
+                gradient_change = np.sum(np.abs(w - last_w))
+                if gradient_change <= self.tol:
+                    break
+                last_w = w
 
-        # 2.initialize parameters
-        w, b = self.initial_paras(dim=X.shape[1])
+        elif optimal_method == 'MBGD':
+            batch_num = kwargs.get('batch_num')
+            for i in range(iter_nums):
+                learning_rate = learning_rate / (1 + i * 30)
+                w = self.mini_batch_gradient_descent(w, X, y, batch_num, learning_rate)
+                gradient_change = np.sum(np.abs(w - last_w))
+                if gradient_change <= self.tol:
+                    break
+                last_w = w
 
-        # 3.update parameters
-        for i in range(iter_nums):
-            cost, dw, db = self.propagate(w, b, X, y)
-            w = w - learning_rate * dw
-            b = b - learning_rate * db
-            if verbose:
-                print('module cost is : ', cost)
-
-        return w, b
+        return w
 
     def fit(self, X, y):
+        # 1.check init paras
+        if not isinstance(self.C, numbers.Number) or self.C < 0:
+            raise ValueError("Penalty term must be positive; got (C=%r)" % self.C)
+        if not isinstance(self.max_iter, numbers.Number) or self.max_iter < 0:
+            raise ValueError("Maximum number of iteration must be positive; got (max_iter=%r)" % self.max_iter)
+        if not isinstance(self.tol, numbers.Number) or self.tol < 0:
+            raise ValueError("Tolerance for stopping criteria must be positive; got (tol=%r)" % self.tol)
+        if self.optimal_method not in ['SGD', 'BGD', 'MBGD']:
+            raise ValueError("Please select an optimal method in ['SGD', 'BGD', 'MBGD']")
+        if self.optimal_method == 'MBGD' and self.batch_num is None:
+            raise ValueError("Please input an appropriate batch num for MBGD")
+        if self.penalty not in ['l1', 'l2']:
+            raise ValueError("Please input an appropriate penalty term in ['l1', 'l2']")
 
-        pass
+        # 2.check input data
+        self.data_check(X, y)
 
-    def predict(self, X, w, b):
-        pass
+        # 3.whether or not fitting intercept
+        n_samples, n_features = X.shape
+        if self.fit_intercept:
+            X = np.concatenate((X, np.ones(shape=(n_samples, 1))), axis=1)
 
-    def __call__(self, *args, **kwargs):
-        self.optimize(iter_nums=100, learning_rate=0.1, verbose=True)
+        # 4.initialize parameters(coef)
+        w = self.initial_paras(dim=X.shape[1])
 
-class softmax_regression(object):
-    '''
-    softmax regression classifier.
+        # 5.solve function
+        self.coef = self.solver(X, y, w, iter_nums=self.max_iter, learning_rate=self.learning_rate,
+                                optimal_method=self.optimal_method, batch_num=self.batch_num)
 
-    Parameters
-    ----------
-    eta: float(default: 0.01)
-        Learning rate(between 0.0 and 1.0)
-    epoches: int(default: 50)
-        Passes over the training data
-        Prior to each epoch, the dataset is shuffled.
-        if 'minibatches > 1' to prevent cycles in stochastic gradient descent.
+    def predict(self, X):
+        if self.coef is None:
+            raise ValueError("Please fit model firstly")
+        n_samples, n_features = X.shape
+        if self.fit_intercept:
+            X = np.concatenate((X, np.ones(shape=(n_samples, 1))), axis=1)
+        pred_prod = self.sigmoid(np.dot(X, self.coef))
+        pred_label = np.array(pred_prod >= 0.5, dtype='int')
 
-    '''
-    def __init__(self, eta=0.01, epochs=50, l2=0.0, minibatches=1, n_classes=None, random_seed=None):
-        self.eta = eta
-        self.epochs = epochs
-        self.l2 = l2
-        self.minibatches = minibatches
-        self.n_classes = n_classes
-        self.random_seed = random_seed
-
-    def _softmax(self, z):
-        return (np.exp(z.T) / np.sum(np.exp(z), axis=1)).T
-
-    def _cross_entropy(self, output, y_target):
-        return -np.sum(np.log(output) * y_target, axis=1)
-
-    def _cost(self, cross_entropy):
-        L2_term = self.l2 * np.sum(self.w_ ** 2)
-        cross_entropy = cross_entropy + L2_term
-        return 0.5 * np.mean(cross_entropy)
-
-    def _one_hot(self, y, n_labels, dtype):
-        '''
-        Return a matrix where each sample in y is represented as a row,
-        and each column represents the class label in the one-hot encoding scheme.
-
-        Example:
-            y = np.array([0, 1, 2, 3, 4, 2])
-            mc = _BaseMultiClass()
-            mc._one_hot(y=y, n_labels=5, dtype='float')
-
-            np.array([[1, 0, 0, 0, 0],
-                      [0, 1, 0, 0, 0],
-                      [0, 0, 1, 0, 0],
-                      [0, 0, 0, 1, 0],
-                      [0, 0, 0, 0, 1],
-                      [0, 0, 1, 0, 0],)
-
-        '''
-        mat = np.zeros((len(y), n_labels))
-        for i, val in enumerate(y):
-            mat[i, val] = 1
-
-        return mat.astype(dtype)
-
-    def _yield_minibatches_idx(self, n_batches, data_array, shuffle=True):
-        indices = np.array(data_array.shape[0])
-
-        if shuffle:
-            indices = np.random.permutation(indices)
-
-
-    def _init_params(self, weight_shape, bias_shape=(1,), dtype='float64',
-                     scale=0.01, random_seed=None):
-        if random_seed:
-            np.random.seed(random_seed)
-        w = np.random.normal(loc=0.0, scale=scale, size=weight_shape)
-        b = np.zeros(shape=bias_shape)
-
-        return b.astype(dtype), w.astype(dtype)
-
-    def _fit(self, X, y, init_params=True):
-        if init_params:
-            if self.n_classes is None:
-                self.n_classes = np.max(y) + 1
-            self._n_features = X.shape[1]
-
-            self.b_, self.w_ = self._init_params(weight_shape=(self._n_features, self.n_classes),
-                                                 bias_shape=(self.n_classes,),
-                                                 random_seed=self.random_seed)
-            self.cost_ = []
-
-        y_enc = self._one_hot(y=y, n_labels=self.n_classes, dtype=np.float)
-
-        for i in range(self.epochs):
-            pass
-            #for idx in self._yield_minibatches_idx():
-
-
-    def fit(self, X, y, init_params=True):
-        if self.random_seed is not None:
-            np.random.seed(self.random_seed)
-        self._fit(X=X, y=y, init_params=init_params)
-
+        return pred_prod, pred_label
 
 if __name__ == '__main__':
-    module = logistic_regression()
-    module()
+    # 1.load data
+    breast_cancer = load_breast_cancer()
+    X = breast_cancer['data']
+    y = breast_cancer['target']
+
+    # 2.split data
+    train_X, test_X, train_y, test_y = train_test_split(X, y, shuffle=True, test_size=0.10)
+
+    # 3.model training and print coef
+    LR = logistic_regression(optimal_method='SGD', batch_num=2, max_iter=300)
+    LR.fit(train_X, train_y)
+
+    # 4.test data and train data fit
+    train_X_pred_prod, train_X_pred_label = LR.predict(train_X)
+    test_X_pred_prod, test_X_pred_label = LR.predict(test_X)
+
+    # 5.calculate evaluation metrics of LR
+    train_set_accuracy = sum(train_y == train_X_pred_label) / train_y.shape[0]
+    train_set_precision = np.sum(
+        (np.array(train_y == 1, dtype='int') + np.array(train_X_pred_label == 1, dtype='int')) == 2) / np.sum(train_X_pred_label == 1)
+    train_set_recall = np.sum(
+        (np.array(train_y == 1, dtype='int') + np.array(train_X_pred_label == 1, dtype='int')) == 2) / np.sum(train_y == 1)
+    train_set_f1_score = 2 / (1 / train_set_precision + 1 / train_set_recall)
+
+    test_set_accuracy = sum(test_y == test_X_pred_label) / test_y.shape[0]
+    test_set_precision = np.sum(
+        (np.array(test_y == 1, dtype='int') + np.array(test_X_pred_label == 1, dtype='int')) == 2) / np.sum(test_X_pred_label == 1)
+    test_set_recall = np.sum(
+        (np.array(test_y == 1, dtype='int') + np.array(test_X_pred_label == 1, dtype='int')) == 2) / np.sum(test_y == 1)
+    test_set_f1_score = 2 / (1 / test_set_precision + 1 / test_set_recall)
+
+    print("train set accuracy is %s, precision is %s, recall is %s, f1_score is %s"
+          %(train_set_accuracy, train_set_precision, train_set_recall, train_set_f1_score))
+    print("test set accuracy is %s, precision is %s, recall is %s, f1_score is %s"
+          % (test_set_accuracy, test_set_precision, test_set_recall, test_set_f1_score))
+
+    # 6.print coef of LR
+    print("The LR model coef is %s" %LR.coef)
