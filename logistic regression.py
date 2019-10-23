@@ -8,6 +8,17 @@ from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 
+def normalize_data(data):
+    '''
+    :param data: input an array
+    :return: z-score
+    '''
+    col_mean = np.mean(data, axis=0)
+    col_std = np.std(data, axis=0)
+    res = (data - col_mean) / col_std
+
+    return res
+
 class logistic_regression(object):
 
     def __init__(self, penalty='l2', C=1.0, tol=1e-4, fit_intercept=True, intercept_scaling=1, optimal_method='SGD',
@@ -36,6 +47,12 @@ class logistic_regression(object):
 
     def sigmoid(self, x):
         res =  1 / (1 + np.exp(-x))
+
+
+        # SGD时，res可能为单元素 numpy.bool_，无法使用in判断（not iterable）
+        if True in np.array(np.isnan(res)) or True in np.array(np.isinf(res)):
+            raise Exception('It Products inf or nan value, please check whether '
+                            'needs to normalize data!')
 
         return res
 
@@ -112,11 +129,11 @@ class logistic_regression(object):
                 learning_rate = learning_rate / (1 + i * 0.3)
                 w = self.stochastic_gradient_descent(w, X, y, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
-                if gradient_change <= self.tol and self.min_iter:
+                if gradient_change <= self.tol and i > self.min_iter:
                     print("gradient update break, the nums of iteration is %s, "
                           "and gradient change is %s" %(i, gradient_change))
                     break
-                last_w = w
+                last_w = w.copy()
 
         elif optimal_method == 'BGD':
             for i in range(iter_nums):
@@ -127,7 +144,7 @@ class logistic_regression(object):
                     print("gradient update break, the nums of iteration is %s, "
                           "and gradient change is %s" % (i, gradient_change))
                     break
-                last_w = w
+                last_w = w.copy()
 
         elif optimal_method == 'MBGD':
             batch_num = kwargs.get('batch_num')
@@ -139,7 +156,7 @@ class logistic_regression(object):
                     print("gradient update break, the nums of iteration is %s, "
                           "and gradient change is %s" % (i, gradient_change))
                     break
-                last_w = w
+                last_w = w.copy()
 
         return w
 
@@ -206,8 +223,12 @@ if __name__ == '__main__':
     # 2.split data
     train_X, test_X, train_y, test_y = train_test_split(X, y, shuffle=True, test_size=0.10)
 
+    # 2.5.normalize data
+    train_X = normalize_data(train_X)
+    test_X = normalize_data(test_X)
+
     # 3.model training and print coef
-    LR = logistic_regression(optimal_method='BGD', batch_num=2, max_iter=100)
+    LR = logistic_regression(optimal_method='SGD', batch_num=2, max_iter=100)
     LR.fit(train_X, train_y)
 
     # 4.test data and train data fit
