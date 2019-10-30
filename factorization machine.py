@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
 import numbers
+import random
 import matplotlib.pyplot as plt
 plt.style.use('ggplot')
-from sklearn.datasets import load_iris, load_breast_cancer
+from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
@@ -19,15 +20,15 @@ def normalize_data(data):
 
     return res
 
-class softmax_regression(object):
+class FM(object):
 
     def __init__(self, penalty='l2', C=1.0, tol=1e-4, fit_intercept=True, intercept_scaling=1, optimal_method='SGD',
-                 learning_rate=0.01, batch_num=None, random_state=None, max_iter=100, min_iter=20, verbose=False,
-                 warm_start=False, n_jobs=None):
+                 learning_rate=0.01, batch_num=None, random_state=None, max_iter=100, min_iter=20, v_len=7):
         self.C = C
         self.tol = tol
         self.penalty = penalty
-        self.coef = None
+        self.w = None
+        self.V = None
         self.fit_intercept = fit_intercept
         self.intercept_scaling = intercept_scaling
         self.optimal_method = optimal_method
@@ -36,59 +37,75 @@ class softmax_regression(object):
         self.random_state = random_state
         self.max_iter = max_iter
         self.min_iter = min_iter
-        self.verbose = verbose
-        self.warm_start = warm_start
-        self.n_jobs = n_jobs
+        self.v_len = v_len
 
     def data_check(self, X, y):
         n_classes = len(np.unique(y))
-        if n_classes < 2:
+        if n_classes != 2:
             raise ValueError("This solver needs samples of at least 2 classes")
 
-    def softmax(self, x, w):
-        # return a prob array, every row is the sample's probs for every label
-        ori_mat = np.exp(np.dot(x, w.T))
-        try:
-            prob_mat = ori_mat / np.sum(ori_mat, axis=1).reshape((ori_mat.shape[0], 1))
-        except:
-            prob_mat = ori_mat / np.sum(ori_mat)
+    def sigmoid(self, x):
+        res =  1 / (1 + np.exp(-x))
 
-        if True in np.isnan(prob_mat) or True in np.isinf(prob_mat):
+        # SGD时，res可能为单元素 numpy.bool_，无法使用in判断（not iterable）
+        if True in np.array(np.isnan(res)) or True in np.array(np.isinf(res)):
             raise Exception('It Products inf or nan value, please check whether '
                             'needs to normalize data!')
 
-        return prob_mat
+        return res
 
-    def initial_paras(self, dim_0, dim_1):
-        '''
-        :param dim_0: nums of classes
-        :param dim_1: X.shape[1]
-        :return: w
-        '''
-        w = np.zeros((dim_0, dim_1))
+    def initial_paras(self, dim, v_len=None):
+        w = np.zeros((dim,))
+        V = np.ones((dim, v_len))
+        for i in range(dim):
+            for j in range(v_len):
+                V[i, j] = random.normalvariate(0, 0.2)
 
-        return w
+        return w, V
+
+    def cross_term(self, X, V):
+        res = np.zeros(shape=(X.shape[0], ))
+        for idx in range(X.shape[0]):
+            x = X[idx, :]
+            V_x = V * np.array(x).reshape((x.shape[0], 1))
+            left = np.sum(V_x, axis=0) ** 2
+            right = np.sum(V_x ** 2, axis=0)
+            res[idx] = np.sum(0.5 * (left - right))
+
+        return res
+
+    def predict_y(self, X, w, V):
+        y_pred = np.dot(X, w) + self.cross_term(X, V)
+
+
+        return y_pred
 
     def penalty_gradient(self, w, C, sample_size):
         # l1正则梯度暂时没推导出，次梯度存在求解慢的问题
         if self.penalty == 'l2':
-            dw = C * w / sample_size
+            dw =  C * w / sample_size
         else:
             dw = w
 
         return dw
 
-    def batch_gradient_descent(self, w, X, y, learning_rate):
-        for label in np.unique(y):
-            # calculate H(w, X) * X
-            select_X = X[y == label, :]
-            H = np.array(1 - self.softmax(select_X, w)[:, label]).reshape((select_X.shape[0], 1))
-            gradient_for_label = np.sum(H * select_X, axis=0) / -X.shape[0]
+    def batch_gradient_descent(self, w, X, y, V, learning_rate):
+        sample_size = X.shape[0]
+        y_pred = self.predict_y(X, w, V)
+        y_y_pred = np.multiply(y, y_pred)
+        grad_prefix = -np.multiply(1 - self.sigmoid(y_y_pred), y)
+        penalty_dw = self.penalty_gradient(w, self.C, sample_size)
+        dw = np.sum(X * grad_prefix.reshape((grad_prefix.shape[0], 1)), axis=0) / sample_size
+        w = w - learning_rate * (dw + penalty_dw)
 
-            penalty_dw = self.penalty_gradient(w[label, :], self.C, select_X.shape[0])
-            w[label, :] = w[label, :] - learning_rate * (gradient_for_label + penalty_dw)
+        n, k = V.shape
+        for i in range(n):
+            for f in range(k):
+                dv_if = np.sum(np.dot(X, V[:, f]) * X[:, i] - V[i, f] * X[:, i] ** 2, axis=0) / sample_size
+                penalty_dv_if = self.penalty_gradient(V[i, f], self.C, sample_size)
+                V[i, f] = np.sum(V[i, f] - learning_rate * (dv_if + penalty_dv_if) * grad_prefix) / sample_size
 
-        return w
+        return w, V
 
     def stochastic_gradient_descent(self, w, X, y, learning_rate):
         for label in np.unique(y):
@@ -128,9 +145,10 @@ class softmax_regression(object):
 
         return w
 
-    def solver(self, X, y, w, iter_nums, learning_rate, optimal_method, verbose=False, *args, **kwargs):
+    def solver(self, X, y, w, V, iter_nums, learning_rate, optimal_method, verbose=False, *args, **kwargs):
         # update parameters
         last_w = 0
+        last_V = 0
         if optimal_method == 'SGD':
             # 终止条件一般有三种: 1.达到最大迭代次数; 2.前后两次梯度变化值小于某个阈值; 3.损失函数变化小于某个阈值
             # 由于SR损失函数存在log计算，很容易导致inf或者nan值，第三种终止判断条件可省略
@@ -147,13 +165,14 @@ class softmax_regression(object):
         elif optimal_method == 'BGD':
             for i in range(iter_nums):
                 adjust_learning_rate = learning_rate / np.sqrt(i + 1)
-                w = self.batch_gradient_descent(w, X, y, adjust_learning_rate)
-                gradient_change = np.sum(np.abs(w - last_w))
+                w, V = self.batch_gradient_descent(w, X, y, V, adjust_learning_rate)
+                gradient_change = np.sum(np.abs(w - last_w)) + np.sum((np.abs(V - last_V)))
                 if gradient_change <= self.tol and i > self.min_iter:
                     print("gradient update break, the nums of iteration is %s, "
                           "and gradient change is %s" % (i, gradient_change))
                     break
                 last_w = w.copy()
+                last_V = V.copy()
 
         elif optimal_method == 'MBGD':
             batch_num = kwargs.get('batch_num')
@@ -168,7 +187,7 @@ class softmax_regression(object):
                 # array1 = array2,array2是array1的视图，指向同一地址
                 last_w = w.copy()
 
-        return w
+        return w, V
 
     def fit(self, X, y):
         # 1.check init paras
@@ -195,28 +214,35 @@ class softmax_regression(object):
 
         # 4.initialize parameters(coef)
         n_classes = len(np.unique(y))
-        w = self.initial_paras(dim_0=n_classes, dim_1=X.shape[1])
+        w, V = self.initial_paras(X.shape[1], self.v_len)
 
         # 5.solve function
-        self.coef = self.solver(X, y, w, iter_nums=self.max_iter, learning_rate=self.learning_rate,
-                                optimal_method=self.optimal_method, batch_num=self.batch_num)
+        self.w, self.V = self.solver(X, y, w, V, iter_nums=self.max_iter, learning_rate=self.learning_rate,
+                                     optimal_method=self.optimal_method, batch_num=self.batch_num)
 
     def predict(self, X):
-        if self.coef is None:
+        if self.w is None or self.V is None:
             raise ValueError("Please fit model firstly")
         n_samples, n_features = X.shape
         if self.fit_intercept:
             X = np.concatenate((X, np.ones(shape=(n_samples, 1))), axis=1)
-        pred_prod = self.softmax(X, self.coef)
-        pred_label = np.argmax(pred_prod, axis=1)
 
-        return pred_prod, pred_label
+        y_pred = self.predict_y(X, self.w, self.V)
+        y_prod = self.sigmoid(y_pred)
+        y_label = np.array(y_prod >= 0.5, dtype='int')
+        y_label[y_label==0] = -1
+
+        return y_prod, y_label
 
 if __name__ == '__main__':
+    '''
+        FM如果不做筛选，选择全部二次项，似乎效果可能不如LR（至少在该数据集效果不如LR）。
+    '''
     # 1.load data
-    iris = load_iris()
-    X = iris['data']
-    y = iris['target']
+    breast_cancer = load_breast_cancer()
+    X = breast_cancer['data']
+    y = breast_cancer['target']
+    y[y==0] = -1
 
     # 2.split data
     train_X, test_X, train_y, test_y = train_test_split(X, y, shuffle=True, test_size=0.10)
@@ -226,19 +252,35 @@ if __name__ == '__main__':
     test_X = normalize_data(test_X)
 
     # 3.model training and print coef
-    SR = softmax_regression(optimal_method='SGD', batch_num=2, max_iter=2, learning_rate=0.05)
-    SR.fit(train_X, train_y)
+    model = FM(optimal_method='BGD', batch_num=2, max_iter=2000)
+    model.fit(train_X, train_y)
 
     # 4.test data and train data fit
-    train_X_pred_prod, train_X_pred_label = SR.predict(train_X)
-    test_X_pred_prod, test_X_pred_label = SR.predict(test_X)
+    train_X_pred_prod, train_X_pred_label = model.predict(train_X)
+    test_X_pred_prod, test_X_pred_label = model.predict(test_X)
 
     # 5.calculate evaluation metrics of LR
     train_set_accuracy = sum(train_y == train_X_pred_label) / train_y.shape[0]
-    test_set_accuracy = sum(test_y == test_X_pred_label) / test_y.shape[0]
+    train_set_precision = np.sum(
+        (np.array(train_y == 1, dtype='int') + np.array(train_X_pred_label == 1, dtype='int')) == 2) / np.sum(
+        train_X_pred_label == 1)
+    train_set_recall = np.sum(
+        (np.array(train_y == 1, dtype='int') + np.array(train_X_pred_label == 1, dtype='int')) == 2) / np.sum(
+        train_y == 1)
+    train_set_f1_score = 2 / (1 / train_set_precision + 1 / train_set_recall)
 
-    print("train set accuracy is %s" %train_set_accuracy)
-    print("test set accuracy is %s" % test_set_accuracy)
+    test_set_accuracy = sum(test_y == test_X_pred_label) / test_y.shape[0]
+    test_set_precision = np.sum(
+        (np.array(test_y == 1, dtype='int') + np.array(test_X_pred_label == 1, dtype='int')) == 2) / np.sum(
+        test_X_pred_label == 1)
+    test_set_recall = np.sum(
+        (np.array(test_y == 1, dtype='int') + np.array(test_X_pred_label == 1, dtype='int')) == 2) / np.sum(test_y == 1)
+    test_set_f1_score = 2 / (1 / test_set_precision + 1 / test_set_recall)
+
+    print("train set accuracy is %s, precision is %s, recall is %s, f1_score is %s"
+          % (train_set_accuracy, train_set_precision, train_set_recall, train_set_f1_score))
+    print("test set accuracy is %s, precision is %s, recall is %s, f1_score is %s"
+          % (test_set_accuracy, test_set_precision, test_set_recall, test_set_f1_score))
 
     # 6.print coef of LR
-    print("The SR model coef is %s" % SR.coef)
+    print("The fm model coef is %s %s" %(model.w, model.V))

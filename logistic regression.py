@@ -48,7 +48,6 @@ class logistic_regression(object):
     def sigmoid(self, x):
         res =  1 / (1 + np.exp(-x))
 
-
         # SGD时，res可能为单元素 numpy.bool_，无法使用in判断（not iterable）
         if True in np.array(np.isnan(res)) or True in np.array(np.isinf(res)):
             raise Exception('It Products inf or nan value, please check whether '
@@ -61,11 +60,10 @@ class logistic_regression(object):
 
         return w
 
-    def penalty_gradient(self, w, C):
-        w_size = w.shape[0]
+    def penalty_gradient(self, w, C, sample_size):
         # l1正则梯度暂时没推导出，次梯度存在求解慢的问题
         if self.penalty == 'l2':
-            dw =  C * w / w_size
+            dw =  C * w / sample_size
         else:
             dw = w
 
@@ -77,7 +75,7 @@ class logistic_regression(object):
         Z = A - y
 
         dw = np.sum(np.array([X[i] * Z[i] for i in range(sample_size)]), axis=0) / sample_size
-        penalty_dw = self.penalty_gradient(w, self.C)
+        penalty_dw = self.penalty_gradient(w, self.C, sample_size)
         w = w - learning_rate * (dw + penalty_dw)
 
         return w
@@ -93,7 +91,7 @@ class logistic_regression(object):
             Z = A - y[idx]
 
             dw = X[idx] * Z
-            penalty_dw = self.penalty_gradient(w, self.C)
+            penalty_dw = self.penalty_gradient(w, self.C, sample_size=1)
             w = w - learning_rate * (dw + penalty_dw)
 
         return w
@@ -114,7 +112,7 @@ class logistic_regression(object):
             Z = A - batch_y
 
             dw = np.sum(np.array([batch_X[i] * Z[i] for i in range(batch_size)]), axis=0) / batch_size
-            penalty_dw = self.penalty_gradient(w, self.C)
+            penalty_dw = self.penalty_gradient(w, self.C, batch_size)
             w = w - learning_rate * (dw + penalty_dw)
 
         return w
@@ -126,7 +124,7 @@ class logistic_regression(object):
             # 终止条件一般有三种: 1.达到最大迭代次数; 2.前后两次梯度变化值小于某个阈值; 3.损失函数变化小于某个阈值
             # 由于LR损失函数存在log计算，很容易导致inf或者nan值，第三种终止判断条件可省略
             for i in range(iter_nums):
-                learning_rate = learning_rate / (1 + i * 0.3)
+                learning_rate = learning_rate / np.sqrt(i + 1)
                 w = self.stochastic_gradient_descent(w, X, y, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
                 if gradient_change <= self.tol and i > self.min_iter:
@@ -137,7 +135,7 @@ class logistic_regression(object):
 
         elif optimal_method == 'BGD':
             for i in range(iter_nums):
-                learning_rate = learning_rate / (1 + i * 0.3)
+                learning_rate = learning_rate / np.sqrt(i + 1)
                 w = self.batch_gradient_descent(w, X, y, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
                 if gradient_change <= self.tol and i > self.min_iter:
@@ -149,7 +147,7 @@ class logistic_regression(object):
         elif optimal_method == 'MBGD':
             batch_num = kwargs.get('batch_num')
             for i in range(iter_nums):
-                learning_rate = learning_rate / (1 + i * 0.3)
+                learning_rate = learning_rate / np.sqrt(i + 1)
                 w = self.mini_batch_gradient_descent(w, X, y, batch_num, learning_rate)
                 gradient_change = np.sum(np.abs(w - last_w))
                 if gradient_change <= self.tol and i > self.min_iter:
